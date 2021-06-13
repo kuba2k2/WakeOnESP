@@ -4,6 +4,7 @@
 #include <FS.h>
 #include <ArduinoJson.h>
 #include <mqttif.h>
+#include <PCF8574.h>
 
 #ifndef BOOL
 #define BOOL boolean
@@ -33,6 +34,8 @@ struct mqtt_if_data
 
 struct mqtt_if_data *mqtt;
 IPAddress mqtt_ipaddr(0, 0, 0, 0);
+
+PCF8574 pcf(0x20);
 
 char config_file[] = "/config.json";
 
@@ -184,8 +187,18 @@ void setupAuth()
     wm.server->addHandler(new AuthHandler());
 }
 
+void wakeRedirect()
+{
+    wm.server->sendHeader(F("Location"), F("/wake"), true);
+    wm.server->sendHeader(F("Cache-Control"), F("no-cache, no-store, must-revalidate"));
+    wm.server->send(301, F("text/plain"), F(""));
+}
+
 void setup()
 {
+    pcf.begin(2, 0);
+    pcf.write(3, LOW);
+
     Serial.begin(74880);
 
     SPIFFS.begin();
@@ -234,6 +247,8 @@ void setup()
         mqttConnect();
     }
 
+    pcf.write(3, HIGH);
+
     wm.server->on("/mqttinfo", []() {
         wm.server->setContentLength(CONTENT_LENGTH_UNKNOWN);
         wm.server->send(200, F("text/html"), F("<div class='msg "));
@@ -268,6 +283,57 @@ void setup()
         wm.server->sendContent(F("</small></em></div>"));
 
         wm.server->sendContent("");
+    });
+
+    wm.server->on("/wake", []() {
+        wm.server->setContentLength(CONTENT_LENGTH_UNKNOWN);
+        wm.server->send(200, F("text/html"), F(""));
+
+        String page;
+        page += FPSTR(HTTP_HEAD_START);
+        page.replace(FPSTR(T_v), "Computers");
+        page += FPSTR(HTTP_SCRIPT);
+        page += FPSTR(HTTP_STYLE);
+        page += FPSTR(HTTP_HEAD_END);
+        wm.server->sendContent(page);
+
+        bool isOn = pcf.read(2);
+
+        wm.server->sendContent(F("<div class='msg "));
+        wm.server->sendContent(isOn ? "S" : "D");
+        wm.server->sendContent(F("'><strong>PC 1</strong><br/><em><small>Powered "));
+        wm.server->sendContent(isOn ? "On" : "Off");
+        wm.server->sendContent(F("</small></em><br><br><form action='/wake-"));
+        wm.server->sendContent(isOn ? "off" : "on");
+        wm.server->sendContent(F("'><button style='background:#"));
+        wm.server->sendContent(isOn ? "dc3630" : "5cb85c");
+        wm.server->sendContent(F("'>Power "));
+        wm.server->sendContent(isOn ? "Off" : "On");
+        wm.server->sendContent(F("</button></form><br><form action='/wake-reset'><button style='background:#777;'>Reset</button></form></div>"));
+
+        wm.server->sendContent_P(HTTP_END);
+        wm.server->sendContent("");
+    });
+
+    wm.server->on("/wake-on", []() {
+        pcf.write(0, LOW);
+        delay(200);
+        pcf.write(0, HIGH);
+        wakeRedirect();
+    });
+
+    wm.server->on("/wake-off", []() {
+        pcf.write(0, LOW);
+        delay(5000);
+        pcf.write(0, HIGH);
+        wakeRedirect();
+    });
+
+    wm.server->on("/wake-reset", []() {
+        pcf.write(1, LOW);
+        delay(200);
+        pcf.write(1, HIGH);
+        wakeRedirect();
     });
 }
 
