@@ -73,6 +73,34 @@ void saveConfig()
     file.close();
 }
 
+class AuthHandler : public RequestHandler {
+    public:
+        AuthHandler() {}
+
+        bool handle(ESP8266WebServer& server, HTTPMethod requestMethod, const String& requestUri) override {
+            if (!server.authenticate(username.getValue(), password.getValue())) {
+                server.requestAuthentication();
+                return true;
+            }
+
+            RequestHandler<WiFiServer>* handler;
+            for (handler = next(); handler; handler = handler->next()) {
+                if (handler->canHandle(requestMethod, requestUri))
+                    return handler->handle(server, requestMethod, requestUri);
+            }
+            return false;
+        }
+
+        bool canHandle(HTTPMethod method, const String& uri) override {
+            return true;
+        }
+};
+
+void setupAuth()
+{
+    wm.server->addHandler(new AuthHandler());
+}
+
 void setup()
 {
     Serial.begin(74880);
@@ -102,6 +130,7 @@ void setup()
     Serial.print(". IP address: ");
     Serial.println(WiFi.localIP());
 
+    wm.setWebServerCallback(setupAuth);
     wm.startWebPortal();
 
     wm.server->on("/hello", []() {
