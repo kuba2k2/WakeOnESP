@@ -39,6 +39,10 @@ PCF8574 pcf(0x20);
 
 char config_file[] = "/config.json";
 
+#define PIN_POWER   3
+#define PIN_RESET   2
+#define PIN_LED     4
+
 void mqttConnect()
 {
     char *broker = (char *)mqtt_broker.getValue();
@@ -197,7 +201,7 @@ void wakeRedirect()
 void setup()
 {
     pcf.begin(2, 0);
-    pcf.write(3, LOW);
+    pcf.write(0, LOW);
 
     Serial.begin(74880);
 
@@ -247,7 +251,7 @@ void setup()
         mqttConnect();
     }
 
-    pcf.write(3, HIGH);
+    pcf.write(0, HIGH);
 
     wm.server->on("/mqttinfo", []() {
         wm.server->setContentLength(CONTENT_LENGTH_UNKNOWN);
@@ -297,7 +301,7 @@ void setup()
         page += FPSTR(HTTP_HEAD_END);
         wm.server->sendContent(page);
 
-        bool isOn = pcf.read(2);
+        bool isOn = pcf.read(PIN_LED);
 
         wm.server->sendContent(F("<div class='msg "));
         wm.server->sendContent(isOn ? "S" : "D");
@@ -309,30 +313,41 @@ void setup()
         wm.server->sendContent(isOn ? "dc3630" : "5cb85c");
         wm.server->sendContent(F("'>Power "));
         wm.server->sendContent(isOn ? "Off" : "On");
-        wm.server->sendContent(F("</button></form><br><form action='/wake-reset'><button style='background:#777;'>Reset</button></form></div>"));
+        wm.server->sendContent(F("</button></form><br>"));
+        if (isOn) {
+            wm.server->sendContent(F("<form action='/wake-suspend'><button style='background:#1fa3ec;'>Suspend</button></form><br>"));
+        }
+        wm.server->sendContent(F("<form action='/wake-reset'><button style='background:#777;'>Reset</button></form></div>"));
 
         wm.server->sendContent_P(HTTP_END);
         wm.server->sendContent("");
     });
 
     wm.server->on("/wake-on", []() {
-        pcf.write(0, LOW);
+        pcf.write(PIN_POWER, LOW);
         delay(200);
-        pcf.write(0, HIGH);
+        pcf.write(PIN_POWER, HIGH);
+        wakeRedirect();
+    });
+
+    wm.server->on("/wake-suspend", []() {
+        pcf.write(PIN_POWER, LOW);
+        delay(200);
+        pcf.write(PIN_POWER, HIGH);
         wakeRedirect();
     });
 
     wm.server->on("/wake-off", []() {
-        pcf.write(0, LOW);
+        pcf.write(PIN_POWER, LOW);
         delay(5000);
-        pcf.write(0, HIGH);
+        pcf.write(PIN_POWER, HIGH);
         wakeRedirect();
     });
 
     wm.server->on("/wake-reset", []() {
-        pcf.write(1, LOW);
+        pcf.write(PIN_RESET, LOW);
         delay(200);
-        pcf.write(1, HIGH);
+        pcf.write(PIN_RESET, HIGH);
         wakeRedirect();
     });
 }
