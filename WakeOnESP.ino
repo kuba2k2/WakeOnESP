@@ -301,7 +301,7 @@ void setup()
         page += FPSTR(HTTP_HEAD_END);
         wm.server->sendContent(page);
 
-        bool isOn = pcf.read(PIN_LED);
+        bool isOn = !pcf.read(PIN_LED);
 
         wm.server->sendContent(F("<div class='msg "));
         wm.server->sendContent(isOn ? "S" : "D");
