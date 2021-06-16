@@ -239,7 +239,7 @@ void setup()
     wm.setWebServerCallback(setupAuth);
     wm.setParamsPage(true);
     wm.setCaptivePortalEnable(false);
-    wm.setCustomHeadElement("<script>fetch('/mqttinfo').then((r) => r.text()).then((t) => document.getElementsByClassName('msg')[0].outerHTML += t);</script>");
+    wm.setCustomHeadElement(R"(<script>if(location.pathname[1]){window.onload=()=>{var x=document.getElementsByClassName('wrap')[0];x.innerHTML="<form action='/'><button style='width:25%;margin:0 0 20px 0;'>Back</button></form>"+x.innerHTML;};}fetch('/mqttinfo').then((r)=>r.text()).then((t)=>document.getElementsByClassName('msg')[0].outerHTML+=t);</script>)");
     wm.startWebPortal();
 
     wm.server->on("/hello", []() {
