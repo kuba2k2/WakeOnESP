@@ -5,15 +5,7 @@
 #include <ArduinoJson.h>
 #include <mqttif.h>
 #include <PCF8574.h>
-
-#ifndef BOOL
-#define BOOL boolean
-#endif
-
-extern "C"
-{
-#include "mqtt/mqtt.h"
-}
+#include "mqtt.h"
 
 WiFiManager wm;
 WiFiManagerParameter username("username", "HTTP Username", NULL, 16);
@@ -25,14 +17,6 @@ WiFiManagerParameter mqtt_password("mqtt_password", "MQTT Password", NULL, 32);
 WiFiManagerParameter mqtt_ip("mqtt_ip", "MQTT VPN IP", NULL, 15);
 WiFiManagerParameter mqtt_secret("mqtt_secret", "MQTT Encryption Password", NULL, 16);
 
-struct mqtt_if_data
-{
-    struct netif netif;
-    ip_addr_t ipaddr;
-    MQTT_Client *mqttcl;
-};
-
-struct mqtt_if_data *mqtt;
 IPAddress mqtt_ipaddr(0, 0, 0, 0);
 
 PCF8574 pcf(0x20);
@@ -43,7 +27,26 @@ char config_file[] = "/config.json";
 #define PIN_RESET   2
 #define PIN_LED     4
 
-void mqttConnect()
+uint32_t disconnectTimer = 0;
+uint32_t restartTimer = 0;
+uint16_t connectionAttempts = 0;
+
+static void mqttOnConnected(uint32_t *args)
+{
+    Serial.println("MQTT Connected");
+    mqtt_if_subscribe(mqtt_if);
+    disconnectTimer = 1;
+}
+
+static void mqttOnDisconnected(uint32_t *args)
+{
+    Serial.println("MQTT Disconnected");
+    disconnectTimer = millis();
+    connectionAttempts = 0;
+    mqtt_if_unsubscribe(mqtt_if);
+}
+
+void mqttInit()
 {
     char *broker = (char *)mqtt_broker.getValue();
     char *username = NULL;
@@ -62,16 +65,56 @@ void mqttConnect()
         sscanf(mqtt_port.getValue(), "%u", &port);
     }
 
-    /* String client_name = String(WIFI_getChipId(), HEX);
+    String client_name = String(WIFI_getChipId(), HEX);
     client_name.toUpperCase();
-    client_name = "ESP_" + client_name; */
+    client_name = "ESP_" + client_name;
 
     volatile uint32_t addr;
     unsigned char *addrBytes = (unsigned char *)&addr;
     sscanf(mqtt_ip.getValue(), "%hhu.%hhu.%hhu.%hhu", addrBytes + 0, addrBytes + 1, addrBytes + 2, addrBytes + 3);
     mqtt_ipaddr = IPAddress(addr);
 
-    mqtt = mqtt_if_init(broker, username, password, port, "mqttip", secret, mqtt_ipaddr, IPAddress(255, 255, 255, 0), IPAddress(0, 0, 0, 0));
+
+    system_os_task(mqtt_if_Task, 1, mqtt_if_procTaskQueue, 2);
+
+    MQTT_InitConnection(&mqttClient, (uint8_t *)broker, port, 0);
+    MQTT_InitClient(&mqttClient, (uint8_t*)client_name.c_str(), (uint8_t *)username, (uint8_t *)password, 120, 1);
+
+    MQTT_OnConnected(&mqttClient, mqttOnConnected);
+    MQTT_OnDisconnected(&mqttClient, mqttOnDisconnected);
+    MQTT_OnData(&mqttClient, mqttOnData);
+
+    mqtt_if = mqtt_if_add(&mqttClient, "mqttip");
+    mqtt_if_set_ipaddr(mqtt_if, mqtt_ipaddr);
+    mqtt_if_set_netmask(mqtt_if, IPAddress(255, 255, 255, 0));
+    mqtt_if_set_gw(mqtt_if, IPAddress(0, 0, 0, 0));
+    mqtt_if_set_up(mqtt_if);
+
+    mqtt_if_add_reading_topic(mqtt_if, mqtt_ipaddr);
+    mqtt_if_add_reading_topic(mqtt_if, IPAddress(255,255,255,255));
+
+    mqtt_if_set_password(mqtt_if, secret);
+
+    mqttConnect();
+    // reconnect later when this fails
+    disconnectTimer = millis();
+}
+
+bool mqttConnected()
+{
+    return mqttClient.connState == MQTT_DATA;
+}
+
+void mqttConnect()
+{
+    if (mqttConnected())
+        return;
+    MQTT_Connect(&mqttClient);
+}
+
+void mqttDisconnect()
+{
+    MQTT_Disconnect(&mqttClient);
 }
 
 bool mqttEnabled()
@@ -155,7 +198,7 @@ void saveConfig()
     serializeJson(json, file);
     Serial.println();
     file.close();
-    ESP.restart();
+    restartTimer = millis();
 }
 
 class AuthHandler : public RequestHandler
@@ -248,7 +291,7 @@ void setup()
 
     if (mqttEnabled())
     {
-        mqttConnect();
+        mqttInit();
     }
 
     pcf.write(0, HIGH);
@@ -262,8 +305,7 @@ void setup()
             return;
         }
 
-        bool connected = mqtt->mqttcl->connState == MQTT_DATA;
-        if (connected)
+        if (mqttConnected())
         {
             wm.server->sendContent(F("S'><strong>MQTT Connected: </strong>"));
         }
@@ -273,17 +315,42 @@ void setup()
         }
 
         char port[6];
-        sprintf(port, "%u", mqtt->mqttcl->port);
 
-        wm.server->sendContent((char *)mqtt->mqttcl->host);
-        wm.server->sendContent(F("<br/><em><small>Broker Address: "));
-        wm.server->sendContent(IPAddress(mqtt->mqttcl->ip).toString());
+        wm.server->sendContent((char *)mqttClient.host);
+        if (!mqttConnected()) {
+            wm.server->sendContent(F("<br>Connection State: "));
+            tConnState state = mqttClient.connState;
+            String stateStr;
+            if (state == DNS_RESOLVE)
+                stateStr = F("Resolving DNS");
+            else if (state == TCP_DISCONNECTED)
+                stateStr = F("TCP Disconnected");
+            else if (state == TCP_CLIENT_DISCONNECTED)
+                stateStr = F("TCP Client Disconnected");
+            else if (state == TCP_CONNECTING)
+                stateStr = F("TCP Connecting");
+            else if (state == TCP_CONNECTED)
+                stateStr = F("TCP Connected");
+            else if (state == TCP_CONNECTING_ERROR)
+                stateStr = F("TCP Connection Error");
+            else if (state == MQTT_DELETED)
+                stateStr = F("MQTT Deleted");
+            else
+                stateStr = F("Unknown");
+            wm.server->sendContent(stateStr);
+            sprintf(port, "%u", connectionAttempts);
+            wm.server->sendContent(F("<br>Connection Attempts: "));
+            wm.server->sendContent(port);
+        }
+        sprintf(port, "%u", mqttClient.port);
+        wm.server->sendContent(F("<br><em><small>Broker Address: "));
+        wm.server->sendContent(IPAddress(mqttClient.ip).toString());
         wm.server->sendContent(":");
         wm.server->sendContent(port);
-        wm.server->sendContent(F("<br/>Node IP: "));
-        wm.server->sendContent(IPAddress(mqtt->ipaddr).toString());
-        wm.server->sendContent(F("<br/>Node Name: "));
-        wm.server->sendContent(mqtt->mqttcl->connect_info.client_id);
+        wm.server->sendContent(F("<br>Node IP: "));
+        wm.server->sendContent(IPAddress(mqtt_if->ipaddr).toString());
+        wm.server->sendContent(F("<br>Node Name: "));
+        wm.server->sendContent(mqttClient.connect_info.client_id);
         wm.server->sendContent(F("</small></em></div>"));
 
         wm.server->sendContent("");
@@ -305,7 +372,7 @@ void setup()
 
         wm.server->sendContent(F("<div class='msg "));
         wm.server->sendContent(isOn ? "S" : "D");
-        wm.server->sendContent(F("'><strong>PC 1</strong><br/><em><small>Powered "));
+        wm.server->sendContent(F("'><strong>PC 1</strong><br><em><small>Powered "));
         wm.server->sendContent(isOn ? "On" : "Off");
         wm.server->sendContent(F("</small></em><br><br><form action='/wake-"));
         wm.server->sendContent(isOn ? "off" : "on");
@@ -355,4 +422,24 @@ void setup()
 void loop()
 {
     wm.process();
+
+    // disconnectTimer == 0 before first connection
+    // disconnectTimer == 1 when connected
+    // disconnectTimer > 1 when disconnected + after first connection *attempt*
+    if (disconnectTimer > 1 && millis() - disconnectTimer > 10000 && !mqttConnected()) {
+        Serial.println("MQTT Reconnecting");
+        disconnectTimer = millis();
+        connectionAttempts++;
+        mqttDisconnect();
+        delay(1000);
+        mqttConnect();
+    }
+    if (disconnectTimer == 1 && !mqttConnected()) {
+        // apparently the OnDisconnected event does not fire sometimes (??)
+        mqttOnDisconnected(0);
+    }
+    if (restartTimer && millis() - restartTimer > 1000) {
+        restartTimer = 0;
+        ESP.reset();
+    }
 }
